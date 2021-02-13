@@ -13,7 +13,7 @@
 #include "gb.h"
 
 
-#ifdef DISABLE_REWIND
+#ifdef GB_DISABLE_REWIND
 #define GB_rewind_free(...)
 #define GB_rewind_push(...)
 #endif
@@ -57,11 +57,14 @@ void GB_log(GB_gameboy_t *gb, const char *fmt, ...)
     va_end(args);
 }
 
-#ifndef DISABLE_DEBUGGER
+#ifndef GB_DISABLE_DEBUGGER
 static char *default_input_callback(GB_gameboy_t *gb)
 {
     char *expression = NULL;
     size_t size = 0;
+    if (gb->debug_stopped) {
+        printf(">");
+    }
 
     if (getline(&expression, &size, stdin) == -1) {
         /* The user doesn't have STDIN or used ^D. We make sure the program keeps running. */
@@ -76,6 +79,12 @@ static char *default_input_callback(GB_gameboy_t *gb)
     size_t length = strlen(expression);
     if (expression[length - 1] == '\n') {
         expression[length - 1] = 0;
+    }
+    
+    if (expression[0] == '\x03') {
+        gb->debug_stopped = true;
+        free(expression);
+        return strdup("");
     }
     return expression;
 }
@@ -119,7 +128,7 @@ static void load_default_border(GB_gameboy_t *gb)
                 }\
             }\
         }\
-    } while(false);
+    } while (false);
     
     if (gb->model == GB_MODEL_AGB) {
         #include "graphics/agb_border.inc"
@@ -148,7 +157,7 @@ void GB_init(GB_gameboy_t *gb, GB_model_t model)
         gb->vram = malloc(gb->vram_size = 0x2000);
     }
 
-#ifndef DISABLE_DEBUGGER
+#ifndef GB_DISABLE_DEBUGGER
     gb->input_callback = default_input_callback;
     gb->async_input_callback = default_async_input_callback;
 #endif
@@ -193,10 +202,18 @@ void GB_free(GB_gameboy_t *gb)
     if (gb->nontrivial_jump_state) {
         free(gb->nontrivial_jump_state);
     }
-#ifndef DISABLE_DEBUGGER
+    if (gb->undo_state) {
+        free(gb->undo_state);
+    }
+#ifndef GB_DISABLE_DEBUGGER
     GB_debugger_clear_symbols(gb);
 #endif
     GB_rewind_free(gb);
+#ifndef GB_DISABLE_CHEATS
+    while (gb->cheats) {
+        GB_remove_cheat(gb, gb->cheats[0]);
+    }
+#endif
     memset(gb, 0, sizeof(*gb));
 }
 
@@ -227,7 +244,7 @@ void GB_borrow_sgb_border(GB_gameboy_t *gb)
     if (gb->border_mode != GB_BORDER_ALWAYS) return;
     if (gb->tried_loading_sgb_border) return;
     gb->tried_loading_sgb_border = true;
-    if (gb->rom[0x146] != 3) return; // Not an SGB game, nothing to borrow
+    if (gb->rom && gb->rom[0x146] != 3) return; // Not an SGB game, nothing to borrow
     if (!gb->boot_rom_load_callback) return; // Can't borrow a border without this callback
     GB_gameboy_t sgb;
     GB_init(&sgb, GB_MODEL_SGB);
@@ -288,7 +305,245 @@ int GB_load_rom(GB_gameboy_t *gb, const char *path)
     fread(gb->rom, 1, gb->rom_size, f);
     fclose(f);
     GB_configure_cart(gb);
+    gb->tried_loading_sgb_border = false;
+    gb->has_sgb_border = false;
+    load_default_border(gb);
     return 0;
+}
+
+int GB_load_isx(GB_gameboy_t *gb, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        GB_log(gb, "Could not open ISX file: %s.\n", strerror(errno));
+        return errno;
+    }
+    char magic[4];
+#define READ(x) if (fread(&x, sizeof(x), 1, f) != 1) goto error
+    fread(magic, 1, sizeof(magic), f);
+    
+#ifdef GB_BIG_ENDIAN
+    bool extended = *(uint32_t *)&magic == 'ISX ';
+#else
+    bool extended = *(uint32_t *)&magic == __builtin_bswap32('ISX ');
+#endif
+    
+    fseek(f, extended? 0x20 : 0, SEEK_SET);
+    
+    
+    uint8_t *old_rom = gb->rom;
+    uint32_t old_size = gb->rom_size;
+    gb->rom = NULL;
+    gb->rom_size = 0;
+    
+    while (true) {
+        uint8_t record_type = 0;
+        if (fread(&record_type, sizeof(record_type), 1, f) != 1) break;
+        switch (record_type) {
+            case 0x01: { // Binary
+                uint16_t bank;
+                uint16_t address;
+                uint16_t length;
+                uint8_t byte;
+                READ(byte);
+                bank = byte;
+                if (byte >= 0x80) {
+                    READ(byte);
+                    bank |= byte << 8;
+                }
+                
+                READ(address);
+#ifdef GB_BIG_ENDIAN
+                address = __builtin_bswap16(address);
+#endif
+                address &= 0x3FFF;
+
+                READ(length);
+#ifdef GB_BIG_ENDIAN
+                length = __builtin_bswap16(length);
+#endif
+
+                size_t needed_size = bank * 0x4000 + address + length;
+                if (needed_size > 1024 * 1024 * 32) goto error;
+                
+                if (gb->rom_size < needed_size) {
+                    gb->rom = realloc(gb->rom, needed_size);
+                    memset(gb->rom + gb->rom_size, 0, needed_size - gb->rom_size);
+                    gb->rom_size = needed_size;
+                }
+                
+                if (fread(gb->rom + (bank * 0x4000 + address), length, 1, f) != 1) goto error;
+                
+                break;
+            }
+                
+            case 0x11: { // Extended Binary
+                uint32_t address;
+                uint32_t length;
+                
+                READ(address);
+#ifdef GB_BIG_ENDIAN
+                address = __builtin_bswap32(address);
+#endif
+                
+                READ(length);
+#ifdef GB_BIG_ENDIAN
+                length = __builtin_bswap32(length);
+#endif
+                size_t needed_size = address + length;
+                if (needed_size > 1024 * 1024 * 32) goto error;
+
+                if (gb->rom_size < needed_size) {
+                    gb->rom = realloc(gb->rom, needed_size);
+                    memset(gb->rom + gb->rom_size, 0, needed_size - gb->rom_size);
+                    gb->rom_size = needed_size;
+                }
+                
+                if (fread(gb->rom + address, length, 1, f) != 1) goto error;
+                
+                break;
+            }
+                
+            case 0x04: { // Symbol
+                uint16_t count;
+                uint8_t length;
+                char name[257];
+                uint8_t flag;
+                uint16_t bank;
+                uint16_t address;
+                uint8_t byte;
+                READ(count);
+#ifdef GB_BIG_ENDIAN
+                count = __builtin_bswap16(count);
+#endif
+                while (count--) {
+                    READ(length);
+                    if (fread(name, length, 1, f) != 1) goto error;
+                    name[length] = 0;
+                    READ(flag); // unused
+                    
+                    READ(byte);
+                    bank = byte;
+                    if (byte >= 0x80) {
+                        READ(byte);
+                        bank |= byte << 8;
+                    }
+                    
+                    READ(address);
+#ifdef GB_BIG_ENDIAN
+                    address = __builtin_bswap16(address);
+#endif
+                    GB_debugger_add_symbol(gb, bank, address, name);
+                }
+                break;
+            }
+                
+            case 0x14: { // Extended Binary
+                uint16_t count;
+                uint8_t length;
+                char name[257];
+                uint8_t flag;
+                uint32_t address;
+                READ(count);
+#ifdef GB_BIG_ENDIAN
+                count = __builtin_bswap16(count);
+#endif
+                while (count--) {
+                    READ(length);
+                    if (fread(name, length + 1, 1, f) != 1) goto error;
+                    name[length] = 0;
+                    READ(flag); // unused
+                    
+                    READ(address);
+#ifdef GB_BIG_ENDIAN
+                    address = __builtin_bswap32(address);
+#endif
+                    // TODO: How to convert 32-bit addresses to Bank:Address? Needs to tell RAM and ROM apart
+                }
+                break;
+            }
+                
+            default:
+                goto done;
+        }
+    }
+done:;
+#undef READ
+    if (gb->rom_size == 0) goto error;
+    
+    size_t needed_size = (gb->rom_size + 0x3FFF) & ~0x3FFF; /* Round to bank */
+    
+    /* And then round to a power of two */
+    while (needed_size & (needed_size - 1)) {
+        /* I promise this works. */
+        needed_size |= needed_size >> 1;
+        needed_size++;
+    }
+    
+    if (needed_size < 0x8000) {
+        needed_size = 0x8000;
+    }
+    
+    if (gb->rom_size < needed_size) {
+        gb->rom = realloc(gb->rom, needed_size);
+        memset(gb->rom + gb->rom_size, 0, needed_size - gb->rom_size);
+        gb->rom_size = needed_size;
+    }
+    
+    GB_configure_cart(gb);
+    
+    // Fix a common wrong MBC error
+    if (gb->rom[0x147] == 3) { // MBC1 + RAM + Battery
+        bool needs_fix = false;
+        if (gb->rom_size >= 0x21 * 0x4000) {
+            for (unsigned i = 0x20 * 0x4000; i < 0x21 * 0x4000; i++) {
+                if (gb->rom[i]) {
+                    needs_fix = true;
+                    break;
+                }
+            }
+        }
+        if (!needs_fix && gb->rom_size >= 0x41 * 0x4000) {
+            for (unsigned i = 0x40 * 0x4000; i < 0x41 * 0x4000; i++) {
+                if (gb->rom[i]) {
+                    needs_fix = true;
+                    break;
+                }
+            }
+        }
+        if (!needs_fix && gb->rom_size >= 0x61 * 0x4000) {
+            for (unsigned i = 0x60 * 0x4000; i < 0x61 * 0x4000; i++) {
+                if (gb->rom[i]) {
+                    needs_fix = true;
+                    break;
+                }
+            }
+        }
+        if (needs_fix) {
+            gb->rom[0x147] = 0x10; // MBC3 + RTC + RAM + Battery
+            GB_configure_cart(gb);
+            gb->rom[0x147] = 0x3;
+            GB_log(gb, "ROM claims to use MBC1 but appears to require MBC3 or 5, assuming MBC3.\n");
+        }
+    }
+    
+    if (old_rom) {
+        free(old_rom);
+    }
+    
+    return 0;
+error:
+    GB_log(gb, "Invalid or unsupported ISX file.\n");
+    if (gb->rom) {
+        free(gb->rom);
+        gb->rom = old_rom;
+        gb->rom_size = old_size;
+    }
+    fclose(f);
+    gb->tried_loading_sgb_border = false;
+    gb->has_sgb_border = false;
+    load_default_border(gb);
+    return -1;
 }
 
 void GB_load_rom_from_buffer(GB_gameboy_t *gb, const uint8_t *buffer, size_t size)
@@ -308,6 +563,9 @@ void GB_load_rom_from_buffer(GB_gameboy_t *gb, const uint8_t *buffer, size_t siz
     memset(gb->rom, 0xff, gb->rom_size);
     memcpy(gb->rom, buffer, size);
     GB_configure_cart(gb);
+    gb->tried_loading_sgb_border = false;
+    gb->has_sgb_border = false;
+    load_default_border(gb);
 }
 
 typedef struct {
@@ -322,6 +580,14 @@ typedef struct {
     uint8_t high;
     uint8_t padding5[3];
 } GB_vba_rtc_time_t;
+
+typedef struct __attribute__((packed)) {
+    uint64_t last_rtc_second;
+    uint16_t minutes;
+    uint16_t days;
+    uint16_t alarm_minutes, alarm_days;
+    uint8_t alarm_enabled;
+} GB_huc3_rtc_time_t;
 
 typedef union {
     struct __attribute__((packed)) {
@@ -345,6 +611,9 @@ int GB_save_battery_size(GB_gameboy_t *gb)
     if (!gb->cartridge_type->has_battery) return 0; // Nothing to save.
     if (gb->mbc_ram_size == 0 && !gb->cartridge_type->has_rtc) return 0; /* Claims to have battery, but has no RAM or RTC */
 
+    if (gb->cartridge_type->mbc_type == GB_HUC3) {
+        return  gb->mbc_ram_size + sizeof(GB_huc3_rtc_time_t);
+    }
     GB_rtc_save_t rtc_save_size;
     return gb->mbc_ram_size + (gb->cartridge_type->has_rtc ? sizeof(rtc_save_size.vba64) : 0);
 }
@@ -358,7 +627,31 @@ int GB_save_battery_to_buffer(GB_gameboy_t *gb, uint8_t *buffer, size_t size)
 
     memcpy(buffer, gb->mbc_ram, gb->mbc_ram_size);
 
-    if (gb->cartridge_type->has_rtc) {
+    if (gb->cartridge_type->mbc_type == GB_HUC3) {
+        buffer += gb->mbc_ram_size;
+
+#ifdef GB_BIG_ENDIAN
+        GB_huc3_rtc_time_t rtc_save = {
+            __builtin_bswap64(gb->last_rtc_second),
+            __builtin_bswap16(gb->huc3_minutes),
+            __builtin_bswap16(gb->huc3_days),
+            __builtin_bswap16(gb->huc3_alarm_minutes),
+            __builtin_bswap16(gb->huc3_alarm_days),
+            gb->huc3_alarm_enabled,
+        };
+#else
+        GB_huc3_rtc_time_t rtc_save = {
+            gb->last_rtc_second,
+            gb->huc3_minutes,
+            gb->huc3_days,
+            gb->huc3_alarm_minutes,
+            gb->huc3_alarm_days,
+            gb->huc3_alarm_enabled,
+        };
+#endif
+        memcpy(buffer, &rtc_save, sizeof(rtc_save));
+    }
+    else if (gb->cartridge_type->has_rtc) {
         GB_rtc_save_t rtc_save = {{{{0,}},},};
         rtc_save.vba64.rtc_real.seconds = gb->rtc_real.seconds;
         rtc_save.vba64.rtc_real.minutes = gb->rtc_real.minutes;
@@ -396,7 +689,33 @@ int GB_save_battery(GB_gameboy_t *gb, const char *path)
         fclose(f);
         return EIO;
     }
-    if (gb->cartridge_type->has_rtc) {
+    if (gb->cartridge_type->mbc_type == GB_HUC3) {
+#ifdef GB_BIG_ENDIAN
+        GB_huc3_rtc_time_t rtc_save = {
+            __builtin_bswap64(gb->last_rtc_second),
+            __builtin_bswap16(gb->huc3_minutes),
+            __builtin_bswap16(gb->huc3_days),
+            __builtin_bswap16(gb->huc3_alarm_minutes),
+            __builtin_bswap16(gb->huc3_alarm_days),
+            gb->huc3_alarm_enabled,
+        };
+#else
+        GB_huc3_rtc_time_t rtc_save = {
+            gb->last_rtc_second,
+            gb->huc3_minutes,
+            gb->huc3_days,
+            gb->huc3_alarm_minutes,
+            gb->huc3_alarm_days,
+            gb->huc3_alarm_enabled,
+        };
+#endif
+
+        if (fwrite(&rtc_save, sizeof(rtc_save), 1, f) != 1) {
+            fclose(f);
+            return EIO;
+        }
+    }
+    else if (gb->cartridge_type->has_rtc) {
         GB_rtc_save_t rtc_save = {{{{0,}},},};
         rtc_save.vba64.rtc_real.seconds = gb->rtc_real.seconds;
         rtc_save.vba64.rtc_real.minutes = gb->rtc_real.minutes;
@@ -430,6 +749,34 @@ void GB_load_battery_from_buffer(GB_gameboy_t *gb, const uint8_t *buffer, size_t
     memcpy(gb->mbc_ram, buffer, MIN(gb->mbc_ram_size, size));
     if (size <= gb->mbc_ram_size) {
         goto reset_rtc;
+    }
+    
+    if (gb->cartridge_type->mbc_type == GB_HUC3) {
+        GB_huc3_rtc_time_t rtc_save;
+        if (size - gb->mbc_ram_size < sizeof(rtc_save)) {
+            goto reset_rtc;
+        }
+        memcpy(&rtc_save, buffer + gb->mbc_ram_size, sizeof(rtc_save));
+#ifdef GB_BIG_ENDIAN
+        gb->last_rtc_second = __builtin_bswap64(rtc_save.last_rtc_second);
+        gb->huc3_minutes = __builtin_bswap16(rtc_save.minutes);
+        gb->huc3_days = __builtin_bswap16(rtc_save.days);
+        gb->huc3_alarm_minutes = __builtin_bswap16(rtc_save.alarm_minutes);
+        gb->huc3_alarm_days = __builtin_bswap16(rtc_save.alarm_days);
+        gb->huc3_alarm_enabled = rtc_save.alarm_enabled;
+#else
+        gb->last_rtc_second = rtc_save.last_rtc_second;
+        gb->huc3_minutes = rtc_save.minutes;
+        gb->huc3_days = rtc_save.days;
+        gb->huc3_alarm_minutes = rtc_save.alarm_minutes;
+        gb->huc3_alarm_days = rtc_save.alarm_days;
+        gb->huc3_alarm_enabled = rtc_save.alarm_enabled;
+#endif
+        if (gb->last_rtc_second > time(NULL)) {
+            /* We must reset RTC here, or it will not advance. */
+            goto reset_rtc;
+        }
+        return;
     }
 
     GB_rtc_save_t rtc_save;
@@ -494,6 +841,9 @@ void GB_load_battery_from_buffer(GB_gameboy_t *gb, const uint8_t *buffer, size_t
 reset_rtc:
     gb->last_rtc_second = time(NULL);
     gb->rtc_real.high |= 0x80; /* This gives the game a hint that the clock should be reset. */
+    gb->huc3_days = 0xFFFF;
+    gb->huc3_minutes = 0xFFF;
+    gb->huc3_alarm_enabled = false;
 exit:
     return;
 }
@@ -508,6 +858,33 @@ void GB_load_battery(GB_gameboy_t *gb, const char *path)
 
     if (fread(gb->mbc_ram, 1, gb->mbc_ram_size, f) != gb->mbc_ram_size) {
         goto reset_rtc;
+    }
+    
+    if (gb->cartridge_type->mbc_type == GB_HUC3) {
+        GB_huc3_rtc_time_t rtc_save;
+        if (fread(&rtc_save, sizeof(rtc_save), 1, f) != 1) {
+            goto reset_rtc;
+        }
+#ifdef GB_BIG_ENDIAN
+        gb->last_rtc_second = __builtin_bswap64(rtc_save.last_rtc_second);
+        gb->huc3_minutes = __builtin_bswap16(rtc_save.minutes);
+        gb->huc3_days = __builtin_bswap16(rtc_save.days);
+        gb->huc3_alarm_minutes = __builtin_bswap16(rtc_save.alarm_minutes);
+        gb->huc3_alarm_days = __builtin_bswap16(rtc_save.alarm_days);
+        gb->huc3_alarm_enabled = rtc_save.alarm_enabled;
+#else
+        gb->last_rtc_second = rtc_save.last_rtc_second;
+        gb->huc3_minutes = rtc_save.minutes;
+        gb->huc3_days = rtc_save.days;
+        gb->huc3_alarm_minutes = rtc_save.alarm_minutes;
+        gb->huc3_alarm_days = rtc_save.alarm_days;
+        gb->huc3_alarm_enabled = rtc_save.alarm_enabled;
+#endif
+        if (gb->last_rtc_second > time(NULL)) {
+            /* We must reset RTC here, or it will not advance. */
+            goto reset_rtc;
+        }
+        return;
     }
 
     GB_rtc_save_t rtc_save;
@@ -571,6 +948,9 @@ void GB_load_battery(GB_gameboy_t *gb, const char *path)
 reset_rtc:
     gb->last_rtc_second = time(NULL);
     gb->rtc_real.high |= 0x80; /* This gives the game a hint that the clock should be reset. */
+    gb->huc3_days = 0xFFFF;
+    gb->huc3_minutes = 0xFFF;
+    gb->huc3_alarm_enabled = false;
 exit:
     fclose(f);
     return;
@@ -640,7 +1020,7 @@ void GB_set_log_callback(GB_gameboy_t *gb, GB_log_callback_t callback)
 
 void GB_set_input_callback(GB_gameboy_t *gb, GB_input_callback_t callback)
 {
-#ifndef DISABLE_DEBUGGER
+#ifndef GB_DISABLE_DEBUGGER
     if (gb->input_callback == default_input_callback) {
         gb->async_input_callback = NULL;
     }
@@ -650,13 +1030,13 @@ void GB_set_input_callback(GB_gameboy_t *gb, GB_input_callback_t callback)
 
 void GB_set_async_input_callback(GB_gameboy_t *gb, GB_input_callback_t callback)
 {
-#ifndef DISABLE_DEBUGGER
+#ifndef GB_DISABLE_DEBUGGER
     gb->async_input_callback = callback;
 #endif
 }
 
-const GB_palette_t GB_PALETTE_GREY = {{{0x00, 0x00, 0x00}, {0x55, 0x55, 0x55}, {0xaa, 0xaa, 0xaa}, {0xff ,0xff, 0xff}, {0xff ,0xff, 0xff}}};
-const GB_palette_t GB_PALETTE_DMG  = {{{0x08, 0x18, 0x10}, {0x39, 0x61, 0x39}, {0x84, 0xa5, 0x63}, {0xc6, 0xde, 0x8c}, {0xd2 ,0xe6 ,0xa6}}};
+const GB_palette_t GB_PALETTE_GREY = {{{0x00, 0x00, 0x00}, {0x55, 0x55, 0x55}, {0xaa, 0xaa, 0xaa}, {0xff, 0xff, 0xff}, {0xff, 0xff, 0xff}}};
+const GB_palette_t GB_PALETTE_DMG  = {{{0x08, 0x18, 0x10}, {0x39, 0x61, 0x39}, {0x84, 0xa5, 0x63}, {0xc6, 0xde, 0x8c}, {0xd2, 0xe6, 0xa6}}};
 const GB_palette_t GB_PALETTE_MGB  = {{{0x07, 0x10, 0x0e}, {0x3a, 0x4c, 0x3a}, {0x81, 0x8d, 0x66}, {0xc2, 0xce, 0x93}, {0xcf, 0xda, 0xac}}};
 const GB_palette_t GB_PALETTE_GBL  = {{{0x0a, 0x1c, 0x15}, {0x35, 0x78, 0x62}, {0x56, 0xb4, 0x95}, {0x7f, 0xe2, 0xc3}, {0x91, 0xea, 0xd0}}};
 
@@ -705,17 +1085,6 @@ void GB_set_infrared_callback(GB_gameboy_t *gb, GB_infrared_callback_t callback)
 void GB_set_infrared_input(GB_gameboy_t *gb, bool state)
 {
     gb->infrared_input = state;
-    gb->cycles_since_input_ir_change = 0;
-    gb->ir_queue_length = 0;
-}
-
-void GB_queue_infrared_input(GB_gameboy_t *gb, bool state, long cycles_after_previous_change)
-{
-    if (gb->ir_queue_length == GB_MAX_IR_QUEUE) {
-        GB_log(gb, "IR Queue is full\n");
-        return;
-    }
-    gb->ir_queue[gb->ir_queue_length++] = (GB_ir_queue_item_t){state, cycles_after_previous_change};
 }
 
 void GB_set_rumble_callback(GB_gameboy_t *gb, GB_rumble_callback_t callback)
@@ -742,6 +1111,7 @@ bool GB_serial_get_data_bit(GB_gameboy_t *gb)
     }
     return gb->io_registers[GB_IO_SB] & 0x80;
 }
+
 void GB_serial_set_data_bit(GB_gameboy_t *gb, bool data)
 {
     if (gb->io_registers[GB_IO_SC] & 1) {
@@ -763,8 +1133,9 @@ void GB_disconnect_serial(GB_gameboy_t *gb)
     gb->serial_transfer_bit_start_callback = NULL;
     gb->serial_transfer_bit_end_callback = NULL;
     
-    /* Reset any internally-emulated device. Currently, only the printer. */
+    /* Reset any internally-emulated device. */
     memset(&gb->printer, 0, sizeof(gb->printer));
+    memset(&gb->workboy, 0, sizeof(gb->workboy));
 }
 
 bool GB_is_inited(GB_gameboy_t *gb)
@@ -1076,6 +1447,10 @@ void GB_switch_model_and_reset(GB_gameboy_t *gb, GB_model_t model)
         gb->ram = realloc(gb->ram, gb->ram_size = 0x2000);
         gb->vram = realloc(gb->vram, gb->vram_size = 0x2000);
     }
+    if (gb->undo_state) {
+        free(gb->undo_state);
+        gb->undo_state = NULL;
+    }
     GB_rewind_free(gb);
     GB_reset(gb);
     load_default_border(gb);
@@ -1236,4 +1611,15 @@ void GB_set_boot_rom_load_callback(GB_gameboy_t *gb, GB_boot_rom_load_callback_t
 {
     gb->boot_rom_load_callback = callback;
     request_boot_rom(gb);
+}
+
+unsigned GB_time_to_alarm(GB_gameboy_t *gb)
+{
+    if (gb->cartridge_type->mbc_type != GB_HUC3) return 0;
+    if (!gb->huc3_alarm_enabled) return 0;
+    if (!(gb->huc3_alarm_days & 0x2000)) return 0;
+    unsigned current_time = (gb->huc3_days & 0x1FFF) * 24 * 60 * 60 + gb->huc3_minutes * 60 + (time(NULL) % 60);
+    unsigned alarm_time = (gb->huc3_alarm_days & 0x1FFF) * 24 * 60 * 60 + gb->huc3_alarm_minutes * 60;
+    if (current_time > alarm_time) return 0;
+    return alarm_time - current_time;
 }

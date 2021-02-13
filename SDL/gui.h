@@ -21,6 +21,7 @@ extern SDL_Window *window;
 extern SDL_Renderer *renderer;
 extern SDL_Texture *texture;
 extern SDL_PixelFormat *pixel_format;
+extern SDL_Haptic *haptic;
 extern shader_t shader;
 
 enum scaling_mode {
@@ -40,6 +41,7 @@ enum pending_command {
     GB_SDL_QUIT_COMMAND,
 };
 
+#define GB_SDL_DEFAULT_SCALE_MAX 8
 
 extern enum pending_command pending_command;
 extern unsigned command_parameter;
@@ -70,7 +72,7 @@ typedef struct {
     SDL_Scancode keys[9];
     GB_color_correction_mode_t color_correction_mode;
     enum scaling_mode scaling_mode;
-    bool blend_frames;
+    uint8_t blending_mode;
     
     GB_highpass_mode_t highpass_mode;
     
@@ -104,6 +106,16 @@ typedef struct {
     /* v0.13 */
     uint8_t dmg_palette;
     GB_border_mode_t border_mode;
+    uint8_t volume;
+    GB_rumble_mode_t rumble_mode;
+
+    uint8_t default_scale;
+    
+    /* v0.14 */
+    unsigned padding;
+    uint8_t color_temperature;
+    char bootrom_path[4096];
+    uint8_t interference_volume;
 } configuration_t;
 
 extern configuration_t configuration;
@@ -115,5 +127,14 @@ void connect_joypad(void);
 
 joypad_button_t get_joypad_button(uint8_t physical_button);
 joypad_axis_t get_joypad_axis(uint8_t physical_axis);
+
+static SDL_Scancode event_hotkey_code(SDL_Event *event)
+{
+    if (event->key.keysym.sym >= SDLK_a && event->key.keysym.sym < SDLK_z) {
+        return SDL_SCANCODE_A + event->key.keysym.sym - SDLK_a;
+    }
+    
+    return event->key.keysym.scancode;
+}
 
 #endif
