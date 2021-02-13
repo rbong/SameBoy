@@ -870,7 +870,7 @@ static void check_variables()
         var.key = "sameboy_audio_output";
         var.value = NULL;
         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) { 
-            if (strcmp(var.value, "Game Boy #1") == 0) {
+            if (strcmp(var.value, "Game Boy #1") == 0)
                 audio_out = GB_1;
             else if (strcmp(var.value, "Game Boy #2") == 0)
                 audio_out = GB_2;
