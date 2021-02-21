@@ -316,6 +316,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         {
             { "Game Boy #1", NULL },
             { "Game Boy #2", NULL },
+            { "Combined", NULL },
             { NULL, NULL },
         },
         "Game Boy #1"
