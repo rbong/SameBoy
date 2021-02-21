@@ -86,6 +86,7 @@ static struct retro_log_callback logging;
 static retro_log_printf_t log_cb;
 
 static retro_video_refresh_t video_cb;
+static retro_audio_sample_t audio_sample_cb;
 static retro_audio_sample_batch_t audio_batch_cb;
 static retro_input_poll_t input_poll_cb;
 static retro_input_state_t input_state_cb;
@@ -133,7 +134,9 @@ static struct retro_rumble_interface rumble;
 
 static void GB_update_keys_status(GB_gameboy_t *gb, unsigned _port)
 {
-    unsigned port;
+    uint16_t joypad_bits = 0;
+
+    unsigned port = 0;
 
     input_poll_cb();
 
@@ -149,10 +152,6 @@ static void GB_update_keys_status(GB_gameboy_t *gb, unsigned _port)
         port = _port == 0 ? 1 : 0;
     else
         port = _port;
-
-    uint16_t joypad_bits = 0;
-
-    input_poll_cb();
 
     if (libretro_supports_bitmasks) {
         joypad_bits = input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
@@ -225,18 +224,18 @@ static void free_output_audio_buffer()
     output_audio_buffer.capacity = 0;
 }
 
-static void upload_output_audio_buffer()
-{
-    int32_t remaining_frames = output_audio_buffer.size / 2;
-    int16_t *buf_pos = output_audio_buffer.data;
-
-    while (remaining_frames > 0) {
-        size_t uploaded_frames = audio_batch_cb(buf_pos, remaining_frames);
-        buf_pos += uploaded_frames * 2;
-        remaining_frames -= uploaded_frames;
-    }
-    output_audio_buffer.size = 0;
-}
+// static void upload_output_audio_buffer()
+// {
+//     int32_t remaining_frames = output_audio_buffer.size / 2;
+//     int16_t *buf_pos = output_audio_buffer.data;
+//
+//     while (remaining_frames > 0) {
+//         size_t uploaded_frames = audio_batch_cb(buf_pos, remaining_frames);
+//         buf_pos += uploaded_frames * 2;
+//         remaining_frames -= uploaded_frames;
+//     }
+//     output_audio_buffer.size = 0;
+// }
 
 static void audio_callback(GB_gameboy_t *gb, GB_sample_t *sample)
 {
@@ -400,23 +399,6 @@ static void set_variable_visibility(void)
         }
     }
 }
-
-/* variables for dual cart dual gameboy mode */
-static const struct retro_variable vars_dual[] = {
-    { "sameboy_link", "Link cable emulation; enabled|disabled" },
-    /*{ "sameboy_ir",   "Infrared Sensor Emulation; disabled|enabled" },*/
-    { "sameboy_screen_layout", "Screen layout; top-down|left-right" },
-    { "sameboy_audio_output", "Audio output; Game Boy #1|Game Boy #2|Combined" },
-    { "sameboy_model_1", "Emulated model for Game Boy #1 (Restart game); Auto|Game Boy|Game Boy Color|Game Boy Advance" },
-    { "sameboy_model_2", "Emulated model for Game Boy #2 (Restart game); Auto|Game Boy|Game Boy Color|Game Boy Advance" },
-    { "sameboy_color_correction_mode_1", "Color correction for Game Boy #1; emulate hardware|preserve brightness|reduce contrast|off|correct curves" },
-    { "sameboy_color_correction_mode_2", "Color correction for Game Boy #2; emulate hardware|preserve brightness|reduce contrast|off|correct curves" },
-    { "sameboy_high_pass_filter_mode_1", "High-pass filter for Game Boy #1; accurate|remove dc offset|off" },
-    { "sameboy_high_pass_filter_mode_2", "High-pass filter for Game Boy #2; accurate|remove dc offset|off" },
-    { "sameboy_rumble_1", "Enable rumble for Game Boy #1; rumble-enabled games|all games|never" },
-    { "sameboy_rumble_2", "Enable rumble for Game Boy #2; rumble-enabled games|all games|never" },
-    { NULL }
-};
 
 static const struct retro_subsystem_memory_info gb1_memory[] = {
     { "srm", RETRO_MEMORY_GAMEBOY_1_SRAM },
@@ -1319,7 +1301,7 @@ void retro_set_environment(retro_environment_t cb)
 
 void retro_set_audio_sample(retro_audio_sample_t cb)
 {
-    (void)cb;
+    audio_sample_cb = cb;
 }
 
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb)
@@ -1435,7 +1417,7 @@ void retro_run(void)
                  GB_get_screen_width(&gameboy[0]) * sizeof(uint32_t));
     }
 
-    upload_output_audio_buffer();
+    // upload_output_audio_buffer();
     initialized = true;
 }
 
