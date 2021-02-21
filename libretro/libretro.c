@@ -72,7 +72,8 @@ enum screen_layout {
 
 enum audio_out {
     GB_1,
-    GB_2
+    GB_2,
+    COMBINED
 };
 
 static enum model model[2];
@@ -94,6 +95,8 @@ static unsigned screen_layout = 0;
 static unsigned audio_out = 0;
 static unsigned sgb_border = 1;
 
+static bool switch_ports = false;
+
 static bool geometry_updated = false;
 static bool link_cable_emulation = false;
 /*static bool infrared_emulation   = false;*/
@@ -105,6 +108,9 @@ char retro_save_directory[4096];
 char retro_game_path[4096];
 
 GB_gameboy_t gameboy[2];
+
+int16_t last_left;
+int16_t last_right;
 
 extern const unsigned char dmg_boot[], cgb_boot[], agb_boot[], sgb_boot[], sgb2_boot[];
 extern const unsigned dmg_boot_length, cgb_boot_length, agb_boot_length, sgb_boot_length, sgb2_boot_length;
@@ -121,9 +127,24 @@ static void fallback_log(enum retro_log_level level, const char *fmt, ...)
 
 static struct retro_rumble_interface rumble;
 
-static void GB_update_keys_status(GB_gameboy_t *gb, unsigned port)
+static void GB_update_keys_status(GB_gameboy_t *gb, unsigned _port)
 {
+    unsigned port;
+
     input_poll_cb();
+
+    bool switch1p = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L);
+    bool switch2p = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R);
+
+    if (switch1p && !switch2p)
+        switch_ports = false;
+    else if (!switch1p && switch2p)
+        switch_ports = true;
+
+    if (switch_ports)
+        port = _port == 0 ? 1 : 0;
+    else
+        port = _port;
 
     GB_set_key_state_for_player(gb, GB_KEY_RIGHT,  emulated_devices == 1 ? port : 0,
         input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT));
@@ -151,8 +172,16 @@ static void GB_update_keys_status(GB_gameboy_t *gb, unsigned port)
 
 static void audio_callback(GB_gameboy_t *gb, GB_sample_t *sample)
 {
-    if ((audio_out == GB_1 && gb == &gameboy[0]) ||
-        (audio_out == GB_2 && gb == &gameboy[1])) {
+    if (audio_out == COMBINED) {
+        if (gb == &gameboy[0]) {
+            last_left = sample->left;
+            last_right = sample->right;
+        } else {
+            audio_sample_cb(last_left + sample->left, last_right + sample->right);
+        }
+    }
+    else if ((audio_out == GB_1 && gb == &gameboy[0]) ||
+             (audio_out == GB_2 && gb == &gameboy[1])) {
             audio_sample_cb(sample->left, sample->right);
     }
 }
@@ -214,7 +243,7 @@ static const struct retro_variable vars_dual[] = {
     { "sameboy_link", "Link cable emulation; enabled|disabled" },
     /*{ "sameboy_ir",   "Infrared Sensor Emulation; disabled|enabled" },*/
     { "sameboy_screen_layout", "Screen layout; top-down|left-right" },
-    { "sameboy_audio_output", "Audio output; Game Boy #1|Game Boy #2" },
+    { "sameboy_audio_output", "Audio output; Game Boy #1|Game Boy #2|Combined" },
     { "sameboy_model_1", "Emulated model for Game Boy #1; Auto|Game Boy|Game Boy Color|Game Boy Advance" },
     { "sameboy_model_2", "Emulated model for Game Boy #2; Auto|Game Boy|Game Boy Color|Game Boy Advance" },
     { "sameboy_color_correction_mode_1", "Color correction for Game Boy #1; off|correct curves|emulate hardware|preserve brightness" },
@@ -273,6 +302,8 @@ static struct retro_input_descriptor descriptors_2p[] = {
     { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A, "A" },
     { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
     { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START, "Start" },
+    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "Send Joypad to 1P" },
+    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Send Joypad to 2P" },
     { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "Left" },
     { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "Up" },
     { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "Down" },
@@ -684,8 +715,10 @@ static void check_variables()
         {
             if (strcmp(var.value, "Game Boy #1") == 0)
                 audio_out = GB_1;
-            else
+            else if (strcmp(var.value, "Game Boy #2") == 0)
                 audio_out = GB_2;
+            else
+                audio_out = COMBINED;
         }
     }
 }
@@ -745,6 +778,9 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 {
     struct retro_game_geometry geom;
     struct retro_system_timing timing = { GB_get_usual_frame_rate(&gameboy[0]), AUDIO_FREQUENCY };
+
+    /* if (audio_out == COMBINED) */
+    /*     timing.sample_rate *= 2; */
 
     if (emulated_devices == 2)
     {
