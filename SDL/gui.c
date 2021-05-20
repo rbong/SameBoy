@@ -18,6 +18,7 @@ SDL_Texture *texture = NULL;
 SDL_PixelFormat *pixel_format = NULL;
 enum pending_command pending_command;
 unsigned command_parameter;
+char *dropped_state_file = NULL;
 
 #ifdef __APPLE__
 #define MODIFIER_NAME " " CMD_STRING
@@ -482,11 +483,26 @@ static void toggle_bootrom(unsigned index)
     }
 }
 
+static void toggle_rtc_mode(unsigned index)
+{
+    configuration.rtc_mode = !configuration.rtc_mode;
+}
+
+const char *current_rtc_mode_string(unsigned index)
+{
+    switch (configuration.rtc_mode) {
+        case GB_RTC_MODE_SYNC_TO_HOST: return "Sync to System Clock";
+        case GB_RTC_MODE_ACCURATE: return "Accurate";
+    }
+    return "";
+}
+
 static const struct menu_item emulation_menu[] = {
     {"Emulated Model:", cycle_model, current_model_string, cycle_model_backwards},
     {"SGB Revision:", cycle_sgb_revision, current_sgb_revision_string, cycle_sgb_revision_backwards},
     {"Boot ROMs Folder:", toggle_bootrom, current_bootrom_string, toggle_bootrom},
     {"Rewind Length:", cycle_rewind, current_rewind_string, cycle_rewind_backwards},
+    {"Real Time Clock:", toggle_rtc_mode, current_rtc_mode_string, toggle_rtc_mode},
     {"Back", return_to_root_menu},
     {NULL,}
 };
@@ -1285,9 +1301,21 @@ void run_gui(bool is_running)
                 break;
             }
             case SDL_DROPFILE: {
-                set_filename(event.drop.file, SDL_free);
-                pending_command = GB_SDL_NEW_FILE_COMMAND;
-                return;
+                if (GB_is_stave_state(event.drop.file)) {
+                    if (GB_is_inited(&gb)) {
+                        dropped_state_file = event.drop.file;
+                        pending_command = GB_SDL_LOAD_STATE_FROM_FILE_COMMAND;
+                    }
+                    else {
+                        SDL_free(event.drop.file);
+                    }
+                    break;
+                }
+                else {
+                    set_filename(event.drop.file, SDL_free);
+                    pending_command = GB_SDL_NEW_FILE_COMMAND;
+                    return;
+                }
             }
             case SDL_JOYBUTTONDOWN:
             {

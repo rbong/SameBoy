@@ -39,12 +39,14 @@ enum pending_command {
     GB_SDL_RESET_COMMAND,
     GB_SDL_NEW_FILE_COMMAND,
     GB_SDL_QUIT_COMMAND,
+    GB_SDL_LOAD_STATE_FROM_FILE_COMMAND,
 };
 
 #define GB_SDL_DEFAULT_SCALE_MAX 8
 
 extern enum pending_command pending_command;
 extern unsigned command_parameter;
+extern char *dropped_state_file;
 
 typedef enum {
     JOYPAD_BUTTON_LEFT,
@@ -116,6 +118,7 @@ typedef struct {
     uint8_t color_temperature;
     char bootrom_path[4096];
     uint8_t interference_volume;
+    GB_rtc_mode_t rtc_mode;
 } configuration_t;
 
 extern configuration_t configuration;
