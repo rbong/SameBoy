@@ -171,6 +171,7 @@ GB_gameboy_t *GB_init(GB_gameboy_t *gb, GB_model_t model)
 #endif
     gb->cartridge_type = &GB_cart_defs[0]; // Default cartridge type
     gb->clock_multiplier = 1.0;
+    gb->apu_output.max_cycles_per_sample = 0x400;
     
     if (model & GB_MODEL_NO_SFC_BIT) {
         /* Disable time syncing. Timing should be done by the SFC emulator. */
@@ -225,9 +226,10 @@ void GB_free(GB_gameboy_t *gb)
 #endif
     GB_rewind_reset(gb);
 #ifndef GB_DISABLE_CHEATS
-    while (gb->cheats) {
-        GB_remove_cheat(gb, gb->cheats[0]);
-    }
+    GB_remove_all_cheats(gb);
+#endif
+#ifndef GB_DISABLE_CHEAT_SEARCH
+    GB_cheat_search_reset(gb);
 #endif
     GB_stop_audio_recording(gb);
         memset(gb, 0, sizeof(*gb));
@@ -549,7 +551,10 @@ int GB_load_isx(GB_gameboy_t *gb, const char *path)
                 bank = byte;
                 if (byte >= 0x80) {
                     READ(byte);
-                    bank |= byte << 8;
+                    /* TODO: This is just a guess, the docs don't elaborate on how banks > 0xFF are saved,
+                       other than the fact that banks >= 80 requires two bytes to store them, and I haven't
+                       encountered an ISX file for a ROM larger than 4MBs yet. */
+                    bank += byte << 7;
                 }
                 
                 READ(address);
@@ -601,9 +606,8 @@ int GB_load_isx(GB_gameboy_t *gb, const char *path)
                 uint8_t length;
                 char name[257];
                 uint8_t flag;
-                uint16_t bank;
+                uint8_t bank;
                 uint16_t address;
-                uint8_t byte;
                 READ(count);
                 count = LE16(count);
                 while (count--) {
@@ -612,12 +616,7 @@ int GB_load_isx(GB_gameboy_t *gb, const char *path)
                     name[length] = 0;
                     READ(flag); // unused
                     
-                    READ(byte);
-                    bank = byte;
-                    if (byte >= 0x80) {
-                        READ(byte);
-                        bank |= byte << 8;
-                    }
+                    READ(bank);
                     
                     READ(address);
                     address = LE16(address);
@@ -1668,8 +1667,10 @@ static void request_boot_rom(GB_gameboy_t *gb)
             case GB_MODEL_CGB_B:
             case GB_MODEL_CGB_C:
             case GB_MODEL_CGB_D:
-            case GB_MODEL_CGB_E:
                 type = GB_BOOT_ROM_CGB;
+                break;
+            case GB_MODEL_CGB_E:
+                type = GB_BOOT_ROM_CGB_E;
                 break;
             case GB_MODEL_AGB_A:
             case GB_MODEL_GBP_A:
@@ -1690,7 +1691,7 @@ static void GB_reset_internal(GB_gameboy_t *gb, bool quick)
         uint8_t extra_oam[sizeof(gb->extra_oam)];
         uint8_t dma, obp0, obp1;
     } *preserved_state = NULL;
-    
+        
     if (quick) {
         preserved_state = alloca(sizeof(*preserved_state));
         memcpy(preserved_state->hram, gb->hram, sizeof(gb->hram));
@@ -1708,7 +1709,7 @@ static void GB_reset_internal(GB_gameboy_t *gb, bool quick)
     GB_update_clock_rate(gb);
     uint8_t rtc_section[GB_SECTION_SIZE(rtc)];
     memcpy(rtc_section, GB_GET_SECTION(gb, rtc), sizeof(rtc_section));
-    memset(gb, 0, (size_t)GB_GET_SECTION((GB_gameboy_t *) 0, unsaved));
+    memset(gb, 0, GB_SECTION_OFFSET(unsaved));
     memcpy(GB_GET_SECTION(gb, rtc), rtc_section, sizeof(rtc_section));
     gb->model = model;
     gb->version = GB_STRUCT_VERSION;
@@ -1762,6 +1763,8 @@ static void GB_reset_internal(GB_gameboy_t *gb, bool quick)
     }
     
     GB_set_internal_div_counter(gb, 8);
+    /* TODO: AGS-101 is inverted in comparison to AGS-001 and AGB */
+    gb->is_odd_frame = gb->model > GB_MODEL_CGB_E;
 
 #ifndef GB_DISABLE_DEBUGGER
     if (gb->nontrivial_jump_state) {
@@ -1786,6 +1789,7 @@ static void GB_reset_internal(GB_gameboy_t *gb, bool quick)
         gb->io_registers[GB_IO_OBP0] = preserved_state->obp0;
         gb->io_registers[GB_IO_OBP1] = preserved_state->obp1;
     }
+    gb->apu.apu_cycles_in_2mhz = true;
     
     gb->magic = GB_state_magic();
     request_boot_rom(gb);
@@ -1807,6 +1811,11 @@ void GB_quick_reset(GB_gameboy_t *gb)
 void GB_switch_model_and_reset(GB_gameboy_t *gb, GB_model_t model)
 {
     GB_ASSERT_NOT_RUNNING(gb)
+    
+#ifndef GB_DISABLE_CHEAT_SEARCH
+    GB_cheat_search_reset(gb);
+#endif
+    
     gb->model = model;
     if (GB_is_cgb(gb)) {
         gb->ram = realloc(gb->ram, gb->ram_size = 0x1000 * 8);
@@ -1904,8 +1913,10 @@ GB_registers_t *GB_get_registers(GB_gameboy_t *gb)
 
 void GB_set_clock_multiplier(GB_gameboy_t *gb, double multiplier)
 {
-    gb->clock_multiplier = multiplier;
-    GB_update_clock_rate(gb);
+    if (multiplier != gb->clock_multiplier) {
+        gb->clock_multiplier = multiplier;
+        GB_update_clock_rate(gb);
+    }
 }
 
 uint32_t GB_get_clock_rate(GB_gameboy_t *gb)
@@ -1931,6 +1942,7 @@ void GB_update_clock_rate(GB_gameboy_t *gb)
     }
     
     gb->clock_rate = gb->unmultiplied_clock_rate * gb->clock_multiplier;
+    GB_set_sample_rate(gb, gb->apu_output.sample_rate);
 }
 
 void GB_set_border_mode(GB_gameboy_t *gb, GB_border_mode_t border_mode)

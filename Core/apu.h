@@ -25,11 +25,22 @@
 
 /* APU ticks are 2MHz, triggered by an internal APU clock. */
 
+#ifdef GB_INTERNAL
+typedef union
+{
+    struct {
+        int16_t left;
+        int16_t right;
+    };
+    uint32_t packed;
+} GB_sample_t;
+#else
 typedef struct
 {
     int16_t left;
     int16_t right;
 } GB_sample_t;
+#endif
 
 typedef struct
 {
@@ -91,7 +102,9 @@ typedef struct
         bool length_enabled; // NRX4
         GB_envelope_clock_t envelope_clock;
         uint8_t delay; // Hack for CGB D/E phantom step due to how sample_countdown is implemented in SameBoy
-        bool did_tick;
+        bool did_tick:1;
+        bool just_reloaded:1;
+        uint8_t padding:6;
     } square_channels[2];
 
     struct {
@@ -135,6 +148,8 @@ typedef struct
         GB_SKIP_DIV_EVENT_SKIP,
     }) skip_div_event;
     uint8_t pcm_mask[2]; // For CGB-0 to CGB-C PCM read glitch
+    
+    bool apu_cycles_in_2mhz; // For compatibility with 0.16.x save states
 } GB_apu_t;
 
 typedef enum {
@@ -154,6 +169,7 @@ typedef struct {
     unsigned sample_rate;
 
     unsigned sample_cycles; // Counts by sample_rate until it reaches the clock frequency
+    unsigned max_cycles_per_sample;
 
     // Samples are NOT normalized to MAX_CH_AMP * 4 at this stage!
     unsigned cycles_since_render;

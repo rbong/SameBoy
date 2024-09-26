@@ -43,7 +43,7 @@ static uint32_t color_to_int(NSColor *color)
     [NSApplication sharedApplication].applicationIconImage = [NSImage imageNamed:@"AppIcon"];
     
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    for (unsigned i = 0; i < GBButtonCount; i++) {
+    for (unsigned i = 0; i < GBKeyboardButtonCount; i++) {
         if ([[defaults objectForKey:button_to_preference_name(i, 0)] isKindOfClass:[NSString class]]) {
             [defaults removeObjectForKey:button_to_preference_name(i, 0)];
         }
@@ -66,7 +66,7 @@ static uint32_t color_to_int(NSColor *color)
                                                               @"GBFilter": @"NearestNeighbor",
                                                               @"GBColorCorrection": @(GB_COLOR_CORRECTION_MODERN_BALANCED),
                                                               @"GBHighpassFilter": @(GB_HIGHPASS_ACCURATE),
-                                                              @"GBRewindLength": @(10),
+                                                              @"GBRewindLength": @(120),
                                                               @"GBFrameBlendingMode": @([defaults boolForKey:@"DisableFrameBlending"]? GB_FRAME_BLENDING_MODE_DISABLED : GB_FRAME_BLENDING_MODE_ACCURATE),
                                                               
                                                               @"GBDMGModel": @(GB_MODEL_DMG_B),
@@ -82,6 +82,8 @@ static uint32_t color_to_int(NSColor *color)
                                                               
                                                               @"GBJoyConAutoPair": @YES,
                                                               @"GBJoyConsDefaultsToHorizontal": @YES,
+                                                              
+                                                              @"GBEmulatedModel": @(MODEL_AUTO),
                                                               
                                                               // Default themes
                                                               @"GBThemes": @{
@@ -216,7 +218,10 @@ static uint32_t color_to_int(NSColor *color)
         [item.image setSize:NSMakeSize(16, 16)];
         [items addObject:item];
     }
-    menu.itemArray = items;
+    [menu removeAllItems];
+    for (NSMenuItem *item in items) {
+        [menu addItem:item];
+    }
 }
 
 - (IBAction) showPreferences: (id) sender

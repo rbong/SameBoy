@@ -547,6 +547,8 @@ static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
         [GB_BOOT_ROM_SGB2] = "sgb2",
         [GB_BOOT_ROM_CGB_0] = "cgb0",
         [GB_BOOT_ROM_CGB] = "cgb",
+        [GB_BOOT_ROM_CGB_E] = "cgbE",
+        [GB_BOOT_ROM_AGB_0] = "agb0",
         [GB_BOOT_ROM_AGB] = "agb",
     }[type];
 
@@ -572,12 +574,20 @@ static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
         [GB_BOOT_ROM_AGB] = agb_boot_length,
     }[type];
 
-    char buf[256];
+    char buf[4096 + 1 + 4 + 9 + 1];
     snprintf(buf, sizeof(buf), "%s%c%s_boot.bin", retro_system_directory, slash, model_name);
     log_cb(RETRO_LOG_INFO, "Initializing as model: %s\n", model_name);
     log_cb(RETRO_LOG_INFO, "Loading boot image: %s\n", buf);
 
     if (GB_load_boot_rom(gb, buf)) {
+        if (type == GB_BOOT_ROM_CGB_E) {
+            boot_rom_load(gb, GB_BOOT_ROM_CGB);
+            return;
+        }
+        if (type == GB_BOOT_ROM_AGB_0) {
+            boot_rom_load(gb, GB_BOOT_ROM_AGB);
+            return;
+        }
         GB_load_boot_rom_from_buffer(gb, boot_code, boot_length);
     }
 }

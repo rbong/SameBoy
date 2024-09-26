@@ -3,9 +3,9 @@
 
 @implementation GBHorizontalLayout
 
-- (instancetype)init
+- (instancetype)initWithTheme:(GBTheme *)theme
 {
-    self = [super init];
+    self = [super initWithTheme:theme];
     if (!self) return nil;
     
     CGSize resolution = {self.resolution.height - self.cutout, self.resolution.width};
@@ -13,6 +13,10 @@
     CGRect screenRect = {0,};
     screenRect.size.height = self.hasFractionalPixels? (resolution.height - self.homeBar) : floor((resolution.height - self.homeBar) / 144) * 144;
     screenRect.size.width = screenRect.size.height / 144 * 160;
+    
+    screenRect.origin.x = (resolution.width - screenRect.size.width) / 2;
+    screenRect.origin.y = (resolution.height - self.homeBar - screenRect.size.height) / 2;
+    self.fullScreenRect = screenRect;
     
     double horizontalMargin, verticalMargin;
     while (true) {
@@ -85,17 +89,29 @@
     self.bLocation = (CGPoint){self.bLocation.x + self.cutout, self.bLocation.y};
     self.startLocation = (CGPoint){self.startLocation.x + self.cutout, self.startLocation.y};
     self.selectLocation = (CGPoint){self.selectLocation.x + self.cutout, self.selectLocation.y};
+    self.abComboLocation = (CGPoint){(self.aLocation.x + self.bLocation.x) / 2,
+                                     (self.aLocation.y + self.bLocation.y) / 2};
+
     
-    UIGraphicsBeginImageContextWithOptions(resolution, true, 1);
+    if (theme.renderingPreview) {
+        UIGraphicsBeginImageContextWithOptions((CGSize){resolution.width / 8, resolution.height / 8}, true, 1);
+        CGContextScaleCTM(UIGraphicsGetCurrentContext(), 1 / 8.0, 1 / 8.0);
+    }
+    else {
+        UIGraphicsBeginImageContextWithOptions(resolution, true, 1);
+    }
     [self drawBackground];
     [self drawScreenBezels];
-    if (drawSameBoyLogo) {
-        double bezelBottom = screenRect.origin.y + screenRect.size.height + screenBorderWidth;
-        double freeSpace = resolution.height - bezelBottom;
-        [self drawLogoInVerticalRange:(NSRange){bezelBottom + screenBorderWidth * 2, freeSpace - screenBorderWidth * 4}];
-    }
     
-    [self drawLabels];
+    [self drawThemedLabelsWithBlock:^{
+        if (drawSameBoyLogo) {
+            double bezelBottom = screenRect.origin.y + screenRect.size.height + screenBorderWidth;
+            double freeSpace = resolution.height - bezelBottom;
+            [self drawLogoInVerticalRange:(NSRange){bezelBottom + screenBorderWidth * 2, freeSpace - screenBorderWidth * 4}];
+        }
+        
+        [self drawLabels];
+    }];
     
     self.background = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
@@ -109,4 +125,10 @@
     }
     return CGRectMake(0, 0, self.background.size.width / self.factor, self.background.size.height / self.factor);
 }
+
+- (CGSize)size
+{
+    return (CGSize){self.resolution.height, self.resolution.width};
+}
+
 @end
